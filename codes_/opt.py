@@ -385,6 +385,11 @@ def make_masks(
         Mode of rfs construction. Default is `random`. Other valid options
         are `one_to_one` and `constant`. Refer to receptive_fields.py in
         random_connectivity function for more information.
+    input_sample : str, optional
+        DESCRIPTION.
+    seed : int, optional
+        DESCRIPTION.
+
 
     Returns
     -------
@@ -393,6 +398,7 @@ def make_masks(
         weights and biases.
 
     """
+    rng = np.random.default_rng(seed)
     Masks = []
     for i in range(num_layers):
         if i == 0:
@@ -418,7 +424,7 @@ def make_masks(
                 rfs_type=rfs_type,
                 prob=0.7,
                 num_channels=channels if i == 0 else 1,
-                seed=seed
+                rng=rng
             )
         else:
             # if no RFs are enabled use random connectivity (like `sparse`)
@@ -430,7 +436,7 @@ def make_masks(
                 inputs=inputs_size*factor,
                 outputs=soma[i]*dends[i],
                 conns=synapses*soma[i]*dends[i],
-                seed=seed,
+                rng=rng
             )
         Masks.append(Mask_s_d)
         # create a mask with `ones` for biases
@@ -447,7 +453,7 @@ def make_masks(
                 inputs=dends[i]*soma[i],
                 outputs=soma[i],
                 conns=dends[i]*soma[i],
-                seed=seed,
+                rng=rng
             )
         # Append the masks
         Masks.append(Mask_d_s)
