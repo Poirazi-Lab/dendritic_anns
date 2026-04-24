@@ -391,7 +391,7 @@ def receptive_fields(
         if opt == 'random':
             # Random allocation
             centers_w = choose_centers(range(M), nodes, seed)
-            centers_h = choose_centers(range(N), nodes, seed)
+            centers_h = choose_centers(range(N), nodes, seed + 1)
             centers_ids = [(x, y) for x, y in zip(centers_w, centers_h)]
         elif opt == 'random_limited':
             if size_rfs is None:
@@ -405,7 +405,7 @@ def receptive_fields(
                 size=size_rfs
             )
             centers_w = choose_centers(rnd_pixels, nodes, seed)
-            centers_h = choose_centers(rnd_pixels, nodes, seed)
+            centers_h = choose_centers(rnd_pixels, nodes, seed + 1)
             centers_ids = [(x, y) for x, y in zip(centers_w, centers_h)]
 
         elif opt == 'semirandom':
@@ -437,7 +437,7 @@ def receptive_fields(
 
             # Random allocation in the middle of the image
             centers_w = choose_centers(range(w1, w2), somata2, seed)
-            centers_h = choose_centers(range(h1, h2), somata2, seed)
+            centers_h = choose_centers(range(h1, h2), somata2, seed + 1)
             centers_ids2 = [(x, y) for x, y in zip(centers_w, centers_h)]
 
             if centers_ids1 is not None and centers_ids2 is not None:
