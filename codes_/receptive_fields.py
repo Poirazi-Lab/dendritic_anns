@@ -6,38 +6,71 @@ Created on Fri May 22 10:39:08 2020.
 @author: spiros
 """
 import numpy as np
-import scipy.ndimage as scn
 
 
-def nb_vals(matrix, indices, size=1, opt=None):
+def nb_vals(matrix, indices, size=1, perimeter=False):
     """
-    https://stackoverflow.com/questions/49210506/how-to-get-all-the-values-of-neighbours-around-an-element-in-matrix.
+    Extract the indices of neighboring elements around a specific center in a matrix.
+
+    This function utilizes L_inf (Chebyshev) distance bounding boxes for highly
+    optimized, O(1) local coordinate extraction, replacing the need for O(M*N)
+    global distance transforms.
+
+    Ref:
+    https://stackoverflow.com/questions/49210506/how-to-get-all-the-values-of-neighbours-around-an-element-in-matrix
 
     Parameters
     ----------
-    matrix : the input numpy.array.
-    indices : list with the center of the neighborhood.
+    matrix : numpy.ndarray
+        The input matrix. Used strictly to determine spatial boundaries (M, N).
+    indices : list or tuple
+        The (row, col) coordinates representing the center of the neighborhood.
+    size : int, optional
+        The radius (Chebyshev distance) of the neighborhood. The default is 1.
+    perimeter : boolean, optional
+        If set true, the function returns only the exact perimeter of
+        the neighborhood (distance == size). Otherwise, it returns the entire
+        filled neighborhood (distance <= size). The default is False.
 
     Returns
     -------
-    nb_indices : indices of the neighborhood.
-
+    nb_indices : numpy.ndarray
+        A 2D array of shape (num_points, 2) containing the spatial coordinates
+        of the requested neighborhood, safely clamped to the image boundaries.
     """
-    indices_ = tuple(np.transpose(np.atleast_2d(indices)))
-    arr_shape = matrix.shape
-    dist = np.ones(arr_shape)
-    dist[indices_] = 0
-    dist = scn.distance_transform_cdt(dist, metric='chessboard')
+    M, N = matrix.shape
+    # Handle the case where indices might be passed as a nested list or tuple
+    r = int(np.atleast_1d(indices)[0])
+    c = int(np.atleast_1d(indices)[1])
 
-    if opt == 'extended':
-        nb_indices = np.transpose(np.nonzero(dist == size))
+    # Define the bounding box, clamped strictly to image boundaries
+    r_min = max(0, r - size)
+    r_max = min(M - 1, r + size)
+    c_min = max(0, c - size)
+    c_max = min(N - 1, c + size)
+
+    # Generate a local 2D grid for just this small patch
+    rr, cc = np.meshgrid(
+        np.arange(r_min, r_max + 1),
+        np.arange(c_min, c_max + 1),
+        indexing='ij'
+    )
+
+    if perimeter:
+        # Chebyshev distance formula: max(|x1 - x2|, |y1 - y2|)
+        # We only keep coordinates where the distance is exactly `size` (the perimeter)
+        dist = np.maximum(np.abs(rr - r), np.abs(cc - c))
+        mask = (dist == size)
+
+        # Extract only the perimeter coordinates
+        return np.column_stack((rr[mask], cc[mask]))
+
     else:
-        nb_indices = np.transpose(np.nonzero(dist <= size))
+        # We want the entire neighborhood (distance <= size)
+        return np.column_stack((rr.flatten(), cc.flatten()))
 
-    return nb_indices
 
-
-def random_connectivity(inputs, outputs, opt='random', conns=None, seed=None):
+def random_connectivity(inputs, outputs, opt='random', conns=None, rng=None):
     """
     Connectivity matrix between two layers.
 
@@ -51,7 +84,7 @@ def random_connectivity(inputs, outputs, opt='random', conns=None, seed=None):
         Method of randomness. The default is 'random'.
     conns : int, optional
         Explicit set of number of connections. The default is None.
-    seed : int, optional
+    rng : int, optional
         A seed to initialize the BitGenerator. The default is None.
 
     Raises
@@ -66,7 +99,8 @@ def random_connectivity(inputs, outputs, opt='random', conns=None, seed=None):
 
     """
     # set the random Generator
-    rng = np.random.default_rng(seed)
+    if rng is None:
+        rng = np.random.default_rng()  # Fallback if none provided
 
     mask = np.zeros(shape=(inputs, outputs))
     if opt == 'one_to_one':
@@ -106,32 +140,7 @@ def random_connectivity(inputs, outputs, opt='random', conns=None, seed=None):
     return mask.astype('int')
 
 
-def choose_centers(possible_values, nodes, seed):
-    """
-    Choose coordinates in the image.
-
-    Parameters
-    ----------
-    possible_values : list
-        List of possible pixels to allocate.
-    nodes : int
-        The number of nodes to allocate centers to.
-    seed : int, optional
-        A seed to initialize the BitGenerator. The default is None.
-
-    Returns
-    -------
-    numpy.ndarray
-        The center of each node in `nodes`.
-
-    """
-    # set the random Generator
-    rng = np.random.default_rng(seed)
-
-    return rng.choice(possible_values, nodes)
-
-
-def allocate_synapses(nb, matrix, num_of_synapses, num_channels=1, seed=None):
+def allocate_synapses(nb, matrix, num_of_synapses, num_channels=1, rng=None):
     """
     The allocation of synapses on dendrites.
 
@@ -145,7 +154,7 @@ def allocate_synapses(nb, matrix, num_of_synapses, num_channels=1, seed=None):
         The number of inputs per dendrite.
     num_channels : int, optional
         The number of channels of input images. The default is 1.
-    seed : int, optional
+    rng : object, optional
         A seed to initialize the BitGenerator. The default is None.
 
     Raises
@@ -160,70 +169,64 @@ def allocate_synapses(nb, matrix, num_of_synapses, num_channels=1, seed=None):
 
     """
     # set the random Generator
-    rng = np.random.default_rng(seed)
+    if rng is None:
+        rng = np.random.default_rng()  # Fallback if none provided
 
     # Allocate inputs to synapses
     M, N = matrix.shape
     mask = np.zeros((M, N))
 
+    # Base neighborhood (radius 1 or 3x3 pixels)
     syn_indices = nb_vals(matrix, list(nb))
 
-    # Extended neighborhood if syns are missing
+    # Expand neighborhood if we don't have enough pixels (e.g., 16 synapses in 3x3)
     if len(syn_indices) < num_of_synapses:
-        diff = num_of_synapses - len(syn_indices)
-        extra_syns = nb_vals(matrix, nb, size=2, opt='extended')
+        current_radius = 2
 
-        cnt = 3
-        while diff > len(extra_syns):
-            extra_syns_more = nb_vals(
-                matrix,
-                nb,
-                size=cnt,
-                opt='extended'
-            )
-            extra_syns = np.concatenate(
-                (extra_syns, extra_syns_more)
-            )
-            cnt += 1
-            if diff <= len(extra_syns):
+        while len(syn_indices) < num_of_synapses:
+            # Grab the next concentric ring (perimeter only)
+            extra_syns = nb_vals(matrix, list(nb), size=current_radius, perimeter=True)
+
+            if len(extra_syns) == 0:
+                # Safety break: We expanded beyond the whole image
                 break
+            diff = num_of_synapses - len(syn_indices)
 
-        added = extra_syns[
-            rng.choice(
-                extra_syns.shape[0],
-                diff,
-                replace=False
-            )
-        ]
-        syn_indices_ = np.concatenate((syn_indices, added))
+            if len(extra_syns) > diff:
+                # We found more than enough in this ring, sample exactly what we need
+                chosen_idx = rng.choice(len(extra_syns), size=diff, replace=False)
+                syn_indices = np.concatenate((syn_indices, extra_syns[chosen_idx]))
+            else:
+                # Take all of them and expand again
+                syn_indices = np.concatenate((syn_indices, extra_syns))
+
+            current_radius += 1
+
+    # Subsample if we have too many pixels
     elif len(syn_indices) > num_of_synapses:
-        # Subsample at random
-        idx = rng.choice(
-            syn_indices.shape[0],
-            num_of_synapses,
-            replace=False
-        )
-        syn_indices_ = syn_indices[idx]
-    else:
-        syn_indices_ = np.copy(syn_indices)
+        idx = rng.choice(len(syn_indices), size=num_of_synapses, replace=False)
+        syn_indices = syn_indices[idx]
 
-    if len(syn_indices_) != num_of_synapses:
-        raise ValueError('Something is wrong!')
+    # Final safety check
+    if len(syn_indices) != num_of_synapses:
+        raise ValueError(f"Could not find {num_of_synapses} pixels. Image might be too small!")
 
-    row_indices = [x[0] for x in syn_indices_]
-    col_indices = [x[1] for x in syn_indices_]
+    # Vectorized indexing to apply the mask
+    row_indices = syn_indices[:, 0]
+    col_indices = syn_indices[:, 1]
     mask[row_indices, col_indices] = 1
+
     if num_channels > 1:
         mask = np.expand_dims(mask, axis=2)
-        mask = np.tile(mask, num_channels)
+        mask = np.tile(mask, (1, 1, num_channels))
 
-    return mask.reshape(M*N*num_channels)
+    return mask.reshape(M * N * num_channels)
 
 
 def make_mask_matrix(
     centers_ids, matrix, dendrites, somata,
     num_of_synapses, num_channels=1,
-    rfs_type='somatic', seed=None
+    rfs_type='somatic', rng=None
     ):
     """
     Create the maks.
@@ -245,6 +248,8 @@ def make_mask_matrix(
     rfs_type : str, optional
         Type of receptive fields. local (`dendritic`) or global (`somatic`).
         The default is 'somatic'.
+    rng : object, optional
+        DESCRIPTION.
 
     Returns
     -------
@@ -252,78 +257,55 @@ def make_mask_matrix(
         The connectivity matrix.
 
     """
-    rng = np.random.default_rng(seed)
-    
+    if rng is None:
+        rng = np.random.default_rng()  # Fallback if none provided
+
     M, N = matrix.shape
-    mask_final = np.zeros((dendrites*somata, matrix.size*num_channels))
+    mask_final = np.zeros((dendrites * somata, matrix.size * num_channels))
     counter = 0
 
     if rfs_type == 'somatic':
-        # Loop for each soma with center--> center of the receptive field
+        # Loop for each soma with center --> center of the receptive field
         for center in centers_ids:
 
-            # Find the centers of the neighborhood
-            nb_indices = nb_vals(matrix, list(center))
+            # Base neighborhood (radius 1)
+            nb_indices = nb_vals(matrix, list(center), size=1)
 
-            # if dendrites of one soma are less than the size of the neighborhood
-            # pick random centers within the neighborhood
+            # Expand if we need more dendrites than available pixels
             if dendrites < len(nb_indices):
-                nb_indices = nb_indices[
-                    rng.choice(
-                        range(len(nb_indices)),
-                        dendrites,
-                        replace=False
-                    )
-                ]
-            # if dendrites of one soma are more than the size of the neighborhood
-            # choose random centers of an extended neighborhood
-            # (+2 pixel from center)
-            elif dendrites > len(nb_indices):
-                diff = dendrites - len(nb_indices)
-                extra_centers = nb_vals(matrix, center, size=2, opt='extended')
+                current_radius = 2
 
-                cnt = 3
-                while diff > len(extra_centers):
-                    extra_centers_more = nb_vals(
-                        matrix, center, size=cnt,
-                        opt='extended'
-                    )
-                    extra_centers = np.concatenate(
-                        (extra_centers, extra_centers_more)
-                    )
-                    cnt += 1
-                    if diff <= len(extra_centers):
-                        break
+                while len(nb_indices) < dendrites:
+                    extra_centers = nb_vals(matrix, list(center), size=current_radius, perimeter=True)
+                    if len(extra_centers) == 0:
+                        break # Safety boundary break
+                    diff = dendrites - len(nb_indices)
+                    if len(extra_centers) > diff:
+                        chosen_idx = rng.choice(len(extra_centers), size=diff, replace=False)
+                        nb_indices = np.concatenate((nb_indices, extra_centers[chosen_idx]))
+                    else:
+                        nb_indices = np.concatenate((nb_indices, extra_centers))
 
-                added = extra_centers[
-                    rng.choice(
-                        extra_centers.shape[0],
-                        diff,
-                        replace=False
-                    )
-                ]
-                nb_indices = np.concatenate((nb_indices, added))
+                    current_radius += 1
 
-            # Allocate inputs to synapses
+            # Subsample if we have an abundance of pixels
+            if len(nb_indices) > dendrites:
+                chosen_idx = rng.choice(len(nb_indices), size=dendrites, replace=False)
+                nb_indices = nb_indices[chosen_idx]
+
             for nb in nb_indices:
                 mask_final[counter, :] = allocate_synapses(
-                    nb,
-                    matrix,
-                    num_of_synapses,
-                    num_channels=num_channels,
-                    seed=seed
+                    nb, matrix, num_of_synapses,
+                    num_channels=num_channels, rng=rng
                 )
                 counter += 1
 
+
     elif rfs_type == 'dendritic':
-        # Loop for each dendrite with center--> center of the receptive field
-        # Allocate inputs to synapses
         for center in centers_ids:
             mask_final[counter, :] = allocate_synapses(
-                center,
-                matrix,
-                num_of_synapses,
-                num_channels=num_channels
+                center, matrix, num_of_synapses,
+                num_channels=num_channels, rng=rng
             )
             counter += 1
 
@@ -333,7 +315,7 @@ def make_mask_matrix(
 def receptive_fields(
     matrix, somata, dendrites, num_of_synapses,
     opt='random', rfs_type="somatic", step=None, prob=None,
-    num_channels=1, size_rfs=None, centers_ids=None, seed=None
+    num_channels=1, num_rfs=None, centers_ids=None, rng=None
     ):
     """
     Construct Receptive Fields like connectivity.
@@ -359,11 +341,11 @@ def receptive_fields(
         DESCRIPTION. The default is None.
     num_channels : TYPE, optional
         DESCRIPTION. The default is 1.
-    size_rfs : int, optional
+    num_rfs : int, optional
         DESCRIPTION. The default is None.
     centers_ids : list, optional
         DESCRIPTION. The default is None.
-    seed : int, optional
+    rng : numpy.random.Generator, optional
         A seed to initialize the BitGenerator. The default is None.
 
     Raises
@@ -379,7 +361,8 @@ def receptive_fields(
         The centroids of RFs.
 
     """
-    rng = np.random.default_rng(seed)
+    if rng is None:
+        rng = np.random.default_rng()  # Fallback if none provided
     M, N = matrix.shape
 
     if rfs_type == 'somatic':
@@ -390,62 +373,61 @@ def receptive_fields(
     if not centers_ids:
         if opt == 'random':
             # Random allocation
-            centers_w = choose_centers(range(M), nodes, seed)
-            centers_h = choose_centers(range(N), nodes, seed + 1)
-            centers_ids = [(x, y) for x, y in zip(centers_w, centers_h)]
+            flat_indices = rng.choice(M * N, size=nodes, replace=True)
+            centers_w, centers_h = np.unravel_index(flat_indices, (M, N))
+            centers_ids = list(zip(centers_w, centers_h))
         elif opt == 'random_limited':
-            if size_rfs is None:
-                raise ValueError('`size_rfs` should be defined under `random_limited` '
+            if num_rfs is None:
+                raise ValueError('`num_rfs` should be defined under `random_limited` '
                                  'and should be a positive integer. '
                                  'Found `None`')
-            # Random allocation -- limited sampling
-            rnd_pixels = rng.integer(
-                low=0,
-                high=matrix.shape[0],
-                size=size_rfs
-            )
-            centers_w = choose_centers(rnd_pixels, nodes, seed)
-            centers_h = choose_centers(rnd_pixels, nodes, seed + 1)
-            centers_ids = [(x, y) for x, y in zip(centers_w, centers_h)]
+            # Random allocation -- limited sampling (repeat the centers)
+            limited_w = rng.integers(0, M, size=num_rfs)
+            limited_h = rng.integers(0, N, size=num_rfs)
+
+            chosen_indices = rng.choice(num_rfs, size=nodes, replace=True)
+            centers_w = limited_w[chosen_indices]
+            centers_h = limited_h[chosen_indices]
+            centers_ids = list(zip(centers_w, centers_h))
 
         elif opt == 'semirandom':
             if prob is None:
                 raise ValueError('`prob` should be defined under `semirandom` '
                                  'and should be a positive float in [0,1]. '
                                  'Found `None`')
-            centers_ids1 = None
-            centers_ids2 = None
+
             p = rng.random(nodes)
-            somata1 = sum(p > prob)  # outside of attention site
-            somata2 = sum(p < prob)  # inside attention site
+            somata1 = np.sum(p > prob)  # outside of attention site
+            somata2 = np.sum(p < prob)  # inside attention site
 
             # image center coordinates
-            w1, w2 = M//2 - M//4, M//2 + M//4
-            h1, h2 = N//2 - N//4, N//2 + N//4
-            # Random allocation outside of the middle of the image
-            centers_w = choose_centers(
-                list(range(w1)) + list(range(w2, M)),
-                somata1,
-                seed,
-            )
-            centers_h = choose_centers(
-                list(range(h1)) + list(range(h2, N)),
-                somata1,
-                seed,
-            )
-            centers_ids1 = [(x, y) for x, y in zip(centers_w, centers_h)]
+            w1, w2 = M // 4, 3 * M // 4
+            h1, h2 = N // 4, 3 * N // 4
 
-            # Random allocation in the middle of the image
-            centers_w = choose_centers(range(w1, w2), somata2, seed)
-            centers_h = choose_centers(range(h1, h2), somata2, seed + 1)
-            centers_ids2 = [(x, y) for x, y in zip(centers_w, centers_h)]
+            # Inside attention site (Center crop)
+            if somata2 > 0:
+                in_w = rng.integers(w1, w2, size=somata2)
+                in_h = rng.integers(h1, h2, size=somata2)
+                centers_ids2 = list(zip(in_w, in_h))
+            else:
+                centers_ids2 = []
 
-            if centers_ids1 is not None and centers_ids2 is not None:
-                centers_ids = centers_ids1 + centers_ids2
-            elif centers_ids1 is None and centers_ids2 is not None:
-                centers_ids = centers_ids2
-            elif centers_ids1 is not None and centers_ids2 is None:
-                centers_ids = centers_ids1
+            # Outside attention site (Peripheral crop)
+            if somata1 > 0:
+                # To efficiently sample the perimeter, we can sample the whole grid
+                # and reject points in the center, or build a valid coordinate list:
+                w_coords, h_coords = np.meshgrid(np.arange(M), np.arange(N), indexing='ij')
+                center_mask = (w_coords >= w1) & (w_coords < w2) & (h_coords >= h1) & (h_coords < h2)
+                valid_periphery = np.argwhere(~center_mask)
+
+                chosen_periphery_idx = rng.choice(len(valid_periphery), size=somata1, replace=True)
+                out_coords = valid_periphery[chosen_periphery_idx]
+                centers_ids1 = list(zip(out_coords[:, 0], out_coords[:, 1]))
+            else:
+                centers_ids1 = []
+
+            # concatenate the centers
+            centers_ids = centers_ids1 + centers_ids2
 
         elif opt == 'serial':
             if step is None:
@@ -459,13 +441,7 @@ def receptive_fields(
                 sparse=False,
                 indexing='ij'
             )
-            centers_ids = [[i, j] for i, j in zip(list(xv.flatten()),
-                                                  list(yv.flatten()))]
-            L = len(centers_ids)
-
-            list_of_indices = list(np.arange(start=0, stop=L, step=step))
-            centers_ids = [centers_ids[i] for i in range(len(centers_ids))
-                           if i in list_of_indices]
+            centers_ids = list(zip(xv.flatten()[::step], yv.flatten()[::step]))
 
     mask_final = make_mask_matrix(
         centers_ids,
@@ -475,7 +451,7 @@ def receptive_fields(
         num_of_synapses,
         num_channels,
         rfs_type,
-        seed
+        rng
     )
 
     return (mask_final.T.astype('int'), centers_ids)
@@ -496,7 +472,7 @@ def connectivity(inputs, outputs):
     -------
     connectivity_matrix : numpy.ndarray [int]
         The connectivity matrix between inputs and outputs.
-    
+
     Raises
     ------
     ValueError
@@ -517,4 +493,3 @@ def connectivity(inputs, outputs):
         end_index = start_index + in_per_out
         connectivity_matrix[start_index:end_index, j] = 1
     return connectivity_matrix
-

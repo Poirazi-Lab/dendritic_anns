@@ -48,7 +48,8 @@ def get_data(
     batch_size : int, optional
         The size of the batch for mini-batch gradient descent. Default is None.
     seed : int, optional
-        A seed to initialize the BitGenerator. The default is None.
+        The integer to initialize the RandomGenerator with the default BitGenerator (PCG64).
+        The default is None.
 
     Returns
     -------
@@ -64,6 +65,8 @@ def get_data(
         The number of channels of input images. RGB images contain 3 channels.
 
     """
+    rng = np.random.default_rng(seed)
+
     # Prepare the training dataset.
     if dtype == 'mnist':
         (x_train, y_train),\
@@ -115,7 +118,7 @@ def get_data(
         dataset = sequential_preprocess(
             x_train, y_train, batch_size=batch_size,
             validation_split=validation_split,
-            seed=seed,
+            rng=rng,
         )
         x_train = dataset['xtrain']
         y_train = dataset['ytrain']
@@ -123,9 +126,15 @@ def get_data(
         y_val = dataset['yval']
 
     else:
-        # Prepare the validation dataset.
-        # Reserve samples for validation.
-        valsize = int(validation_split*x_train.shape[0])
+        # Standard validation split
+        # BEST PRACTICE: Shuffle the indices deterministically before splitting!
+        # If the dataset is naturally sorted, slicing [-valsize:] biases validation.
+        indices = np.arange(x_train.shape[0])
+        rng.shuffle(indices)
+        x_train = x_train[indices]
+        y_train = y_train[indices]
+
+        valsize = int(validation_split * x_train.shape[0])
         x_val = x_train[-valsize:]
         y_val = y_train[-valsize:]
         x_train = x_train[:-valsize]
@@ -141,7 +150,6 @@ def get_data(
     labels['test'] = y_test
 
     if add_noise:
-        rng = np.random.default_rng(seed)
         for key in data.keys():
             pertrubation = rng.normal(
                 loc=0.0,
@@ -154,7 +162,6 @@ def get_data(
             )
 
     return data, labels, img_height, img_width, channels
-
 
 def check_common_member(a, b):
     """
@@ -181,7 +188,7 @@ def check_common_member(a, b):
 
 def sequential_preprocess(
     input_train, target_train, batch_size,
-    validation_split, seed=None):
+    validation_split, rng=None):
     """
     Appearance of the data in a sequential manner.
 
@@ -212,7 +219,8 @@ def sequential_preprocess(
 
     """
     # set the random Generator
-    rng = np.random.default_rng(seed)
+    if rng is None:
+        rng = np.random.default_rng()
 
     target_train = target_train.squeeze()
     a, b = np.unique(
